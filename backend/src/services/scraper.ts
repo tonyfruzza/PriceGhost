@@ -446,6 +446,20 @@ async function scrapeWithBrowser(url: string): Promise<string> {
     // Retry up to 3 times on ERR_HTTP2_PROTOCOL_ERROR
     let activePage = page;
     let lastNavError: string | null = null;
+
+    // Pre-navigate to homepage for sites that need cookies/sessions
+    const homepage = (() => {
+      try { return new URL(url).origin; } catch { return null; }
+    })();
+    if (homepage) {
+      try {
+        await activePage.goto(homepage, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (_) {
+        // home page navigation is optional
+      }
+    }
+
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         if (attempt > 0) {
