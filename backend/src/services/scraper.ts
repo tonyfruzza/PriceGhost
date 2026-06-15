@@ -253,8 +253,8 @@ function extractGenericCssCandidates($: CheerioAPI): PriceCandidate[] {
 async function getRemoteBrowserWSEndpoint(): Promise<string | null> {
   const remoteUrl = process.env.REMOTE_BROWSER_URL || 'http://browser-node.openclaw.svc.cluster.local:9222';
   try {
-    const response = await axios.get<string>(`${remoteUrl}/json/version`, { timeout: 5000 });
-    const data = JSON.parse(response.data);
+    const response = await axios.get<Record<string, string>>(`${remoteUrl}/json/version`, { timeout: 5000 });
+    const data = response.data; // axios auto-parses JSON
     const wsUrl = data.webSocketDebuggerUrl;
     if (wsUrl) {
       // Replace localhost with the actual remote host
