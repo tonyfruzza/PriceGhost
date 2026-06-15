@@ -52,6 +52,12 @@ const initDatabase = async () => {
     `);
     console.log('Created price_history index');
 
+    // Migration: Add openai_base_url column for LiteLLM/OpenAI-compatible proxy support
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS openai_base_url VARCHAR(512);
+    `);
+    console.log('Migration: added openai_base_url column');
+
     await client.query('COMMIT');
     console.log('Database initialization complete');
   } catch (error) {
