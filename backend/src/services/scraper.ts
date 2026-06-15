@@ -248,6 +248,118 @@ function extractGenericCssCandidates($: CheerioAPI): PriceCandidate[] {
 
 // Browser-based scraping for sites that block HTTP requests (e.g., Cloudflare)
 /**
+ * Extract product image URL by evaluating JavaScript in a real browser.
+ * Used as a last resort when cheerio-based extraction fails on JS-heavy sites.
+ */
+async function extractImageFromBrowser(url: string): Promise<string | null> {
+  try {
+    const wsEndpoint = await getRemoteBrowserWSEndpoint();
+    if (!wsEndpoint) {
+      console.log(`[BrowserImage] No remote browser available for ${url}`);
+      return null;
+    }
+
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: wsEndpoint,
+      defaultViewport: { width: 1920, height: 1080 },
+    });
+
+    try {
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      // Try multiple strategies in the browser's JS context
+      // Use string-based evaluate to avoid TypeScript DOM type issues in Node context
+      const imageUrl = await page.evaluate(`
+        (function() {
+          // Strategy 1: Open Graph image
+          var ogImg = document.querySelector('meta[property="og:image"]');
+          if (ogImg) {
+            var content = ogImg.getAttribute('content');
+            if (content && !content.startsWith('data:') && !content.startsWith('blob:')) return content;
+          }
+
+          // Strategy 2: JSON-LD scripts
+          var scripts = document.querySelectorAll('script[type="application/ld+json"]');
+          for (var i = 0; i < scripts.length; i++) {
+            try {
+              var data = JSON.parse(scripts[i].textContent || '');
+              var img = data.image || data.thumbnailUrl;
+              if (img && typeof img === 'string' && !img.startsWith('data:') && !img.startsWith('blob:')) return img;
+              if (img && typeof img === 'object' && img.url) return img.url;
+            } catch(e) {}
+          }
+
+          // Strategy 3: itemprop image
+          var itemProp = document.querySelector('[itemprop="image"]');
+          if (itemProp) {
+            var src = itemProp.getAttribute('src') || itemProp.getAttribute('content') || itemProp.getAttribute('href');
+            if (src && !src.startsWith('data:') && !src.startsWith('blob:')) return src;
+          }
+
+          // Strategy 4: Common product image selectors in rendered DOM
+          var selectors = [
+            '[data-test="image-gallery-item-0"] img',
+            '[data-test="product-image"]',
+            'img.primary-image',
+            '[data-testid="hero-image"]',
+            '[data-testid*="image"] img',
+            '[class*="gallery"] img',
+            '[class*="carousel"] img',
+            '.product-image img',
+            '.main-image img',
+            'img[loading="lazy"]',
+          ];
+
+          for (var j = 0; j < selectors.length; j++) {
+            var el = document.querySelector(selectors[j]);
+            if (el) {
+              var src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-lazy-src');
+              if (src && !src.startsWith('data:') && !src.startsWith('blob:')) return src;
+            }
+          }
+
+          // Strategy 5: Any img with "product" in class or alt
+          var allImgs = document.querySelectorAll('img');
+          for (var k = 0; k < allImgs.length; k++) {
+            var img = allImgs[k];
+            var alt = (img.getAttribute('alt') || '').toLowerCase();
+            var cls = (img.getAttribute('class') || '').toLowerCase();
+            var id = (img.getAttribute('id') || '').toLowerCase();
+            if (alt.indexOf('product') >= 0 || cls.indexOf('product') >= 0 || id.indexOf('product') >= 0) {
+              var src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+              if (src && !src.startsWith('data:') && !src.startsWith('blob:')) return src;
+            }
+          }
+
+          // Strategy 6: First non-placeholder image in main content area
+          var main = document.querySelector('main, [role="main"], #main, .main-content, .product-detail');
+          var container = main || document.body;
+          var imgs = container.querySelectorAll('img:not([src*="placeholder"]):not([src*="pixel"]):not([src*="spacer"])');
+          for (var m = 0; m < imgs.length; m++) {
+            var img = imgs[m];
+            var src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+            if (src && !src.startsWith('data:') && !src.startsWith('blob:')) return src;
+          }
+
+          return null;
+        })();
+      `) as string | null;
+
+      if (imageUrl) {
+        console.log(`[BrowserImage] Found image via browser JS for ${url}: ${(imageUrl as string).substring(0, 80)}`);
+      }
+      return imageUrl as string | null;
+    } finally {
+      await browser.disconnect();
+    }
+  } catch (e) {
+    console.error(`[BrowserImage] Failed to extract image from browser for ${url}: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
  * Get the remote browser WebSocket endpoint from browser-node service
  */
 async function getRemoteBrowserWSEndpoint(): Promise<string | null> {
@@ -752,6 +864,13 @@ const siteScrapers: SiteScraper[] = [
       const imageUrl = $('img.primary-image').attr('src') ||
                        $('[data-testid="image-gallery-image"]').attr('src') ||
                        $('img[class*="product-image"]').attr('src') ||
+                       $('[class*="image-gallery"] img').first().attr('src') ||
+                       $('.product-image img').first().attr('src') ||
+                       $('img[alt*="product" i]').first().attr('src') ||
+                       $('script[type="application/ld+json"]').toArray()
+                         .map(s => { try { const d = JSON.parse($(s).html() || ''); return d.image || d.thumbnailUrl; } catch { return null; } })
+                         .find(Boolean) ||
+                       $('meta[property="og:image"]').attr('content') ||
                        null;
 
       console.log(`[BestBuy] Final result - name: ${!!name}, price: ${price ? (price as ParsedPrice).price : null}, image: ${!!imageUrl}`);
@@ -783,6 +902,12 @@ const siteScrapers: SiteScraper[] = [
                    null;
 
       const imageUrl = $('[data-test="image-gallery-item-0"] img').attr('src') ||
+                       $('[data-test="product-image"]').attr('src') ||
+                       $('[data-test*="hero"] img').first().attr('src') ||
+                       $('script[type="application/ld+json"]').toArray()
+                         .map(s => { try { const d = JSON.parse($(s).html() || ''); return d.image || d.thumbnailUrl; } catch { return null; } })
+                         .find(Boolean) ||
+                       $('meta[property="og:image"]').attr('content') ||
                        null;
 
       return { name, price, imageUrl };
@@ -1174,6 +1299,16 @@ const genericImageSelectors = [
   '.main-image img',
   '[data-zoom-image]',
   'img[class*="product"]',
+  'img[loading="lazy"]',
+  '[data-test*="image"] img',
+  '[data-testid*="image"] img',
+  '.gallery img',
+  '.carousel img',
+  '.hero-image img',
+  '.pdp-image img',
+  '.product-hero img',
+  'picture source[type="image/webp"]',
+  'img[itemprop="thumbnail"]',
 ];
 
 export async function scrapeProduct(url: string, userId?: number): Promise<ScrapedProduct> {
@@ -1541,6 +1676,20 @@ export async function scrapeProductWithVoting(
     }
     if (result.stockStatus === 'unknown') {
       result.stockStatus = extractGenericStockStatus($);
+    }
+
+    // Last resort: if we used the browser and still have no image URL,
+    // try extracting it by evaluating JavaScript in the real browser context
+    if (!result.imageUrl && usedBrowser) {
+      try {
+        const browserImg = await extractImageFromBrowser(url);
+        if (browserImg) {
+          result.imageUrl = browserImg;
+          console.log(`[Voting] Found image via browser JS extraction for ${url}`);
+        }
+      } catch (imgError) {
+        console.error(`[Voting] Browser image extraction failed for ${url}:`, imgError);
+      }
     }
 
     // Store all candidates
@@ -1997,6 +2146,38 @@ function extractGenericName($: CheerioAPI): string | null {
 }
 
 function extractGenericImage($: CheerioAPI, baseUrl: string): string | null {
+  // First, check ALL img tags for lazy-loaded data attributes
+  // Modern sites often hide the real URL in data attributes instead of src
+  const dataAttrCandidates = [
+    'data-src', 'data-lazy-src', 'data-original',
+    'data-image-src', 'data-image-url', 'data-img-url',
+    'data-zoom-image',
+  ];
+  const imgs = $('img').toArray();
+  for (const img of imgs) {
+    const $img = $(img);
+    for (const attr of dataAttrCandidates) {
+      const val = $img.attr(attr);
+      if (val && !val.startsWith('data:') && !val.startsWith('blob:')) {
+        try {
+          return new URL(val, baseUrl).href;
+        } catch (_e) {
+          return val;
+        }
+      }
+    }
+    // Also check the src attribute directly, but skip base64/blob URLs
+    const src = $img.attr('src');
+    if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
+      try {
+        return new URL(src, baseUrl).href;
+      } catch (_e) {
+        return src;
+      }
+    }
+  }
+
+  // Fall back to CSS selectors for standard patterns
   for (const selector of genericImageSelectors) {
     const element = $(selector).first();
     if (element.length) {
@@ -2005,7 +2186,7 @@ function extractGenericImage($: CheerioAPI, baseUrl: string): string | null {
         element.attr('content') ||
         element.attr('data-zoom-image') ||
         element.attr('data-src');
-      if (src) {
+      if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
         try {
           return new URL(src, baseUrl).href;
         } catch (_e) {
