@@ -247,22 +247,71 @@ function extractGenericCssCandidates($: CheerioAPI): PriceCandidate[] {
 }
 
 // Browser-based scraping for sites that block HTTP requests (e.g., Cloudflare)
+/**
+ * Get the remote browser WebSocket endpoint from browser-node service
+ */
+async function getRemoteBrowserWSEndpoint(): Promise<string | null> {
+  const remoteUrl = process.env.REMOTE_BROWSER_URL || 'http://browser-node.openclaw.svc.cluster.local:9222';
+  try {
+    const response = await axios.get<string>(`${remoteUrl}/json/version`, { timeout: 5000 });
+    const data = JSON.parse(response.data);
+    const wsUrl = data.webSocketDebuggerUrl;
+    if (wsUrl) {
+      // Replace localhost with the actual remote host
+      const remoteHost = new URL(remoteUrl).hostname;
+      const remotePort = new URL(remoteUrl).port || '9222';
+      return wsUrl.replace(/ws:\/\/localhost(:\d+)?/, `ws://${remoteHost}:${remotePort}`);
+    }
+  } catch (e) {
+    console.log(`[Browser] Remote browser not available at ${remoteUrl}: ${(e as Error).message}`);
+  }
+  return null;
+}
+
 async function scrapeWithBrowser(url: string): Promise<string> {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-infobars',
-      '--disable-crash-reporter',
-      '--window-size=1920,1080',
-      '--start-maximized',
-    ],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    ignoreDefaultArgs: ['--enable-automation'],
-  });
+  let browser;
+  let connected = false;
+
+  // Try remote browser first
+  const wsEndpoint = await getRemoteBrowserWSEndpoint();
+  if (wsEndpoint) {
+    try {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: { width: 1920, height: 1080 },
+      });
+      connected = true;
+      console.log(`[Browser] Connected to remote browser at ${wsEndpoint}`);
+    } catch (e) {
+      console.log(`[Browser] Remote connection failed: ${(e as Error).message}`);
+    }
+  }
+
+  if (!connected) {
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-infobars',
+          '--disable-crash-reporter',
+          '--window-size=1920,1080',
+          '--start-maximized',
+        ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        ignoreDefaultArgs: ['--enable-automation'],
+      });
+    } catch (e) {
+      throw new Error(`No browser available: remote unavailable and local launch failed: ${(e as Error).message}`);
+    }
+  }
+
+  if (!browser) {
+    throw new Error('Failed to acquire browser instance');
+  }
 
   try {
     const page = await browser.newPage();
@@ -311,7 +360,11 @@ async function scrapeWithBrowser(url: string): Promise<string> {
     const html = await page.content();
     return html;
   } finally {
-    await browser.close();
+    if (connected) {
+      await browser.disconnect();
+    } else {
+      await browser.close();
+    }
   }
 }
 
