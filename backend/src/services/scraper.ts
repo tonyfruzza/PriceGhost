@@ -426,28 +426,59 @@ async function scrapeWithBrowser(url: string): Promise<string> {
   }
 
   try {
-    const page = await browser.newPage();
+    // Close any hanging pages from previous scrapes
+    const existingPages = await browser.pages();
+    for (const p of existingPages) {
+      if (p.url() !== 'about:blank') {
+        try { await p.close(); } catch (_) {}
+      }
+    }
 
-    // Set viewport
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    );
     await page.setViewport({ width: 1920, height: 1080 });
 
     // Navigate to the page - use domcontentloaded for reliability (networkidle2
     // hangs on heavy sites like Best Buy with endless tracking/analytics scripts)
-    try {
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-    } catch (navError) {
-      console.log(`[Browser] Navigation warning: ${(navError as Error).message?.substring(0, 100)}`);
-      // If navigation timed out or failed, try to continue anyway - 
-      // the page might have partially loaded
+    // Retry up to 3 times on ERR_HTTP2_PROTOCOL_ERROR
+    // Retry up to 3 times on ERR_HTTP2_PROTOCOL_ERROR
+    let activePage = page;
+    let lastNavError: string | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) {
+          console.log(`[Browser] Navigation attempt ${attempt + 1}...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          // Open a fresh page for retry
+          const freshPage = await browser.newPage();
+          await activePage.close().catch(() => {});
+          activePage = freshPage;
+        }
+        await activePage.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        });
+        lastNavError = null;
+        break;
+      } catch (navError) {
+        lastNavError = (navError as Error).message;
+        if (!lastNavError.includes('ERR_HTTP2_PROTOCOL_ERROR')) {
+          console.log(`[Browser] Navigation warning: ${lastNavError.substring(0, 100)}`);
+          break;
+        }
+        console.log(`[Browser] HTTP2 error (attempt ${attempt + 1}), retrying...`);
+      }
+    }
+    if (lastNavError) {
+      console.log(`[Browser] Final navigation warning: ${lastNavError.substring(0, 100)}`);
     }
 
-    // Add some human-like behavior
-    await page.mouse.move(100, 200);
+    // Add some human-like behavior (use activePage to handle retry scenario)
+    await activePage.mouse.move(100, 200);
     await new Promise(resolve => setTimeout(resolve, 500));
-    await page.mouse.move(300, 400);
+    await activePage.mouse.move(300, 400);
 
     // Wait for Cloudflare challenge to complete if present
     // Check if we're on a challenge page and wait for it to resolve
@@ -455,7 +486,7 @@ async function scrapeWithBrowser(url: string): Promise<string> {
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitTime) {
-      const title = await page.title();
+      const title = await activePage.title();
       // Cloudflare challenge pages have titles like "Just a moment..."
       if (!title.toLowerCase().includes('just a moment') &&
           !title.toLowerCase().includes('checking your browser')) {
@@ -463,7 +494,7 @@ async function scrapeWithBrowser(url: string): Promise<string> {
       }
       console.log(`[Browser] Waiting for Cloudflare challenge to complete... (${title})`);
       // Move mouse randomly while waiting
-      await page.mouse.move(
+      await activePage.mouse.move(
         100 + Math.random() * 500,
         100 + Math.random() * 400
       );
@@ -472,11 +503,11 @@ async function scrapeWithBrowser(url: string): Promise<string> {
 
     // Scroll down a bit like a human would
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    await page.evaluate('window.scrollBy(0, 300)');
+    await activePage.evaluate('window.scrollBy(0, 300)');
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     // Get the full HTML content
-    const html = await page.content();
+    const html = await activePage.content();
     if (html && html.length > 1000) {
       console.log(`[Browser] Page loaded: ${html.length} bytes`);
       return html;
