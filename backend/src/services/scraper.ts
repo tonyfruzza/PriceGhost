@@ -433,10 +433,16 @@ async function scrapeWithBrowser(url: string): Promise<string> {
 
     // Navigate to the page - use domcontentloaded for reliability (networkidle2
     // hangs on heavy sites like Best Buy with endless tracking/analytics scripts)
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
+    try {
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+    } catch (navError) {
+      console.log(`[Browser] Navigation warning: ${(navError as Error).message?.substring(0, 100)}`);
+      // If navigation timed out or failed, try to continue anyway - 
+      // the page might have partially loaded
+    }
 
     // Add some human-like behavior
     await page.mouse.move(100, 200);
@@ -471,7 +477,30 @@ async function scrapeWithBrowser(url: string): Promise<string> {
 
     // Get the full HTML content
     const html = await page.content();
-    return html;
+    if (html && html.length > 1000) {
+      console.log(`[Browser] Page loaded: ${html.length} bytes`);
+      return html;
+    }
+    console.log(`[Browser] Page content too small (${html?.length || 0}b), retrying with fresh page...`);
+    // Retry with a fresh page if we have the endpoint
+    if (wsEndpoint) {
+      await browser.disconnect();
+      connected = false;
+      browser = await puppeteer.connect({
+        browserWSEndpoint: wsEndpoint,
+        defaultViewport: { width: 1920, height: 1080 },
+      });
+    connected = true;
+    const page2 = await browser.newPage();
+    await page2.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    // Wait for the page to settle
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    const html2 = await page2.content();
+    console.log(`[Browser] Retry result: ${html2?.length || 0} bytes`);
+    return html2 || html || '';
+    } else {
+      return html || '';
+    }
   } finally {
     if (connected) {
       await browser.disconnect();
@@ -1595,13 +1624,9 @@ export async function scrapeProductWithVoting(
           html = await scrapeWithBrowser(url);
           usedBrowser = true;
         } catch (browserError) {
-          if (axiosError instanceof AxiosError && axiosError.response?.status === 403) {
-            // 403 with browser failure - we have nothing
-            console.log(`[Voting] Both HTTP and browser failed for ${url}`);
-          } else {
-            // Non-403 + browser failure - rethrow original
-            throw axiosError;
-          }
+          // Log the browser error specifically and continue with empty HTML
+          // Don't rethrow - the function will return the default empty result
+          console.log(`[Voting] Browser fallback also failed: ${(browserError as Error).message?.substring(0, 200)}`);
         }
       } else {
         throw axiosError;
@@ -1609,7 +1634,7 @@ export async function scrapeProductWithVoting(
     }
 
     // If we got HTML but it's suspiciously small (e.g., blocking page) and browser is available, try browser
-    if (!usedBrowser && requiresBrowser && html.length < 50000) {
+    if (html && !usedBrowser && requiresBrowser && html.length < 50000) {
       console.log(`[Voting] HTTP response too small (${html.length}b), content may be blocked. Trying browser...`);
       try {
         html = await scrapeWithBrowser(url);
@@ -1619,7 +1644,7 @@ export async function scrapeProductWithVoting(
       }
     }
 
-    let $ = load(html);
+    let $ = load(html || '');
 
     // Collect candidates from all methods
     const allCandidates: PriceCandidate[] = [];
