@@ -335,7 +335,7 @@ interface SiteScraper {
 const siteScrapers: SiteScraper[] = [
   // Amazon
   {
-    match: (url) => /amazon\.(com|co\.uk|ca|de|fr|es|it|co\.jp|in|com\.au)/i.test(url),
+    match: (url) => /(?:a\.co|amazon\.(?:com|co\.uk|ca|de|fr|es|it|co\.jp|in|com\.au))/i.test(url),
     scrape: ($) => {
       // Helper to check if element is inside a coupon/savings container
       const isInCouponContainer = (el: ReturnType<typeof $>) => {
