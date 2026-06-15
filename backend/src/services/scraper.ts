@@ -1587,25 +1587,23 @@ export async function scrapeProductWithVoting(
       html = response.data;
       console.log(`[Voting] HTTP fetch OK: ${url} (${html.length} bytes)`);
     } catch (axiosError) {
-      if (axiosError instanceof AxiosError && axiosError.response?.status === 403) {
-        console.log(`[Voting] HTTP blocked (403) for ${url}`);
-        if (requiresBrowser) {
-          console.log(`[Voting] Falling back to browser rendering...`);
+      if (requiresBrowser) {
+        // For JS-heavy sites, try the browser regardless of the HTTP failure reason
+        console.log(`[Voting] HTTP attempt failed for ${url}, trying browser...`);
+        try {
           html = await scrapeWithBrowser(url);
           usedBrowser = true;
+        } catch (browserError) {
+          if (axiosError instanceof AxiosError && axiosError.response?.status === 403) {
+            // 403 with browser failure - we have nothing
+            console.log(`[Voting] Both HTTP and browser failed for ${url}`);
+          } else {
+            // Non-403 + browser failure - rethrow original
+            throw axiosError;
+          }
         }
       } else {
-        if (requiresBrowser) {
-          console.log(`[Voting] HTTP error for JS-heavy site, trying browser...`);
-          try {
-            html = await scrapeWithBrowser(url);
-            usedBrowser = true;
-          } catch (browserError) {
-            throw axiosError; // Throw the original error
-          }
-        } else {
-          throw axiosError;
-        }
+        throw axiosError;
       }
     }
 
