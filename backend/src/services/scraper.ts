@@ -1382,15 +1382,9 @@ export async function scrapeProductWithVoting(
   try {
     let usedBrowser = false;
 
-    // For JS-heavy sites, go straight to browser
-    if (requiresBrowser) {
-      console.log(`[Voting] ${new URL(url).hostname} requires browser rendering, using Puppeteer...`);
-      html = await scrapeWithBrowser(url);
-      usedBrowser = true;
-    } else {
-      // Fetch HTML
-      try {
-        const response = await axios.get<string>(url, {
+    // Try plain HTTP first for all sites (includes JSON-LD data even for JS-heavy sites)
+    try {
+      const response = await axios.get<string>(url, {
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -1403,14 +1397,38 @@ export async function scrapeProductWithVoting(
         maxRedirects: 5,
       });
       html = response.data;
-      } catch (axiosError) {
-        if (axiosError instanceof AxiosError && axiosError.response?.status === 403) {
-          console.log(`[Voting] HTTP blocked (403) for ${url}, using browser...`);
+      console.log(`[Voting] HTTP fetch OK: ${url} (${html.length} bytes)`);
+    } catch (axiosError) {
+      if (axiosError instanceof AxiosError && axiosError.response?.status === 403) {
+        console.log(`[Voting] HTTP blocked (403) for ${url}`);
+        if (requiresBrowser) {
+          console.log(`[Voting] Falling back to browser rendering...`);
           html = await scrapeWithBrowser(url);
           usedBrowser = true;
+        }
+      } else {
+        if (requiresBrowser) {
+          console.log(`[Voting] HTTP error for JS-heavy site, trying browser...`);
+          try {
+            html = await scrapeWithBrowser(url);
+            usedBrowser = true;
+          } catch (browserError) {
+            throw axiosError; // Throw the original error
+          }
         } else {
           throw axiosError;
         }
+      }
+    }
+
+    // If we got HTML but it's suspiciously small (e.g., blocking page) and browser is available, try browser
+    if (!usedBrowser && requiresBrowser && html.length < 50000) {
+      console.log(`[Voting] HTTP response too small (${html.length}b), content may be blocked. Trying browser...`);
+      try {
+        html = await scrapeWithBrowser(url);
+        usedBrowser = true;
+      } catch (browserError) {
+        console.log(`[Voting] Browser also failed, keeping HTTP result.`);
       }
     }
 
