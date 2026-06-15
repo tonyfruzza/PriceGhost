@@ -431,10 +431,11 @@ async function scrapeWithBrowser(url: string): Promise<string> {
     // Set viewport
     await page.setViewport({ width: 1920, height: 1080 });
 
-    // Navigate to the page and wait for content to load
+    // Navigate to the page - use domcontentloaded for reliability (networkidle2
+    // hangs on heavy sites like Best Buy with endless tracking/analytics scripts)
     await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 45000,
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
     });
 
     // Add some human-like behavior
